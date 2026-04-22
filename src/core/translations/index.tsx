@@ -320,92 +320,101 @@ export const useTranslationRequest = (options?: {
 			}
 
 			if ("translationApiConfig" in config) {
-				const apiConfig = config.translationApiConfig;
+			  const apiConfig = config.translationApiConfig;
+			
+			  if (apiConfig.api_type === TranslationApiType.DeepL) {
+			    setStartTranslateLoading(true);
+			    let result: DeepLTranslateResult | undefined;
+			    try {
+			      result = await translateTextDeepL(
+			        apiConfig.api_uri,
+			        apiConfig.api_key,
+			        params.sourceContent,
+			        convertLanguageCodeToDeepLSourceLanguageCode(params.sourceLanguage),
+			        convertLanguageCodeToDeepLTargetLanguageCode(params.targetLanguage),
+			        apiConfig.deepl_prefer_quality_optimized ?? false,
+			      );
+			    } catch (error) {
+			      appError("[customTranslation] translateTextDeepL error", error);
+			    }
+			    setStartTranslateLoading(false);
+			
+			    if (!result) {
+			      return {
+			        success: false,
+			      };
+			    }
+			
+			    options?.onComplete?.(
+			      result.translations.map((item) => ({
+			        content: item.text,
+			      })),
+			      params.requestId,
+			    );
+			
+			    return {
+			      success: true,
+			      result: result.translations.map((item) => ({
+			        content: item.text,
+			      })),
+			    };
+			  }
+			
+			if (apiConfig.api_type === TranslationApiType.Custom) {
+				setStartTranslateLoading(true);
+				try {
+					// 必须先创建 client 实例 (兼容可能存在的不同字段名)
+					const customClient = new OpenAI({
+						apiKey: (apiConfig as any).api_key ?? "",
+						baseURL: (apiConfig as any).api_uri ?? (apiConfig as any).custom_api_uri ?? "",
+						dangerouslyAllowBrowser: true,
+						fetch: appFetch,
+					});
 
-				if (apiConfig.api_type === TranslationApiType.DeepL) {
-					setStartTranslateLoading(true);
+					// 调用 llama.cpp 的 Chat API (流式)
+					const streamResponse = await customClient.chat.completions.create({
+						model: (apiConfig as any).api_model ?? "",
+						messages: [
+							{ role: "system", content: "你是一个翻译助手，请将以下文本翻译成目标语言。" },
+							{ role: "user", content: `请将以下文本从 ${params.sourceLanguage} 翻译成${params.targetLanguage}：\n${params.sourceContent.join('\n')}` }
+						],
+						stream: true
+					});
 
-					let result: DeepLTranslateResult | undefined;
-					try {
-						result = await translateTextDeepL(
-							apiConfig.api_uri,
-							apiConfig.api_key,
-							params.sourceContent,
-							convertLanguageCodeToDeepLSourceLanguageCode(
-								params.sourceLanguage,
-							),
-							convertLanguageCodeToDeepLTargetLanguageCode(
-								params.targetLanguage,
-							),
-							apiConfig.deepl_prefer_quality_optimized ?? false,
-						);
-					} catch (error) {
-						appError("[customTranslation] translateTextDeepL error", error);
+					setDeltaTranslateLoading(true);
+					setTranslatedContent("");
+					let customResponseContent = "";
+					
+					// 正确处理流式响应（打字机效果）
+					for await (const event of streamResponse) {
+						if (event.choices.length > 0 && event.choices[0].delta.content) {
+							const deltaContent = event.choices[0].delta.content;
+							setTranslatedContent((prev) => `${prev}${deltaContent}`);
+							customResponseContent += deltaContent;
+							options?.onDeltaContent?.(deltaContent);
+						}
 					}
-
+					
+					setDeltaTranslateLoading(false);
 					setStartTranslateLoading(false);
 
-					if (!result) {
-						return {
-							success: false,
-						};
-					}
-
-					options?.onComplete?.(
-						result.translations.map((item) => ({
-							content: item.text,
-						})),
-						params.requestId,
-					);
-
+					// 返回最终结果
+					const customResult = [{ content: customResponseContent }];
+					options?.onComplete?.(customResult, params.requestId);
+					
 					return {
 						success: true,
-						result: result.translations.map((item) => ({
-							content: item.text,
-						})),
+						result: customResult,
 					};
-				}
-
-				if (apiConfig.api_type === TranslationApiType.Custom) {
-					setStartTranslateLoading(true);
-
-					let result: Awaited<ReturnType<typeof translateTextCustomWithLimits>>;
-					try {
-						result = await translateTextCustomWithLimits(
-							apiConfig,
-							params.sourceContent,
-							params.sourceLanguage,
-							params.targetLanguage,
-						);
-					} catch (error) {
-						appError("[customTranslation] translateTextCustom error", error);
-					}
-
+				} catch (error) {
+					appError("[customTranslation] llama.cpp chat error", error);
+					setDeltaTranslateLoading(false);
 					setStartTranslateLoading(false);
-
-					if (!result) {
-						return {
-							success: false,
-						};
-					}
-
-					options?.onComplete?.(
-						result.translations.map((item) => ({
-							content: item.text,
-						})),
-						params.requestId,
-					);
-
 					return {
-						success: true,
-						result: result.translations.map((item) => ({
-							content: item.text,
-						})),
+						success: false,
 					};
 				}
-			}
-
-			if (!("apiConfig" in config)) {
+				// 如果是自定义翻译API，处理完上面的 DeepL 或 Custom 就直接结束，不走下面的普通AI模型逻辑
 				return {
 					success: false,
 				};
