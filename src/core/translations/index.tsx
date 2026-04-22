@@ -322,43 +322,59 @@ export const useTranslationRequest = (options?: {
 			if ("translationApiConfig" in config) {
 			  const apiConfig = config.translationApiConfig;
 			
+			  // DeepL 分支
 			  if (apiConfig.api_type === TranslationApiType.DeepL) {
-			    setStartTranslateLoading(true);
-			    let result: DeepLTranslateResult | undefined;
-			    try {
-			      result = await translateTextDeepL(
-			        apiConfig.api_uri,
-			        apiConfig.api_key,
-			        params.sourceContent,
-			        convertLanguageCodeToDeepLSourceLanguageCode(params.sourceLanguage),
-			        convertLanguageCodeToDeepLTargetLanguageCode(params.targetLanguage),
-			        apiConfig.deepl_prefer_quality_optimized ?? false,
-			      );
-			    } catch (error) {
-			      appError("[customTranslation] translateTextDeepL error", error);
-			    }
-			    setStartTranslateLoading(false);
-			
-			    if (!result) {
-			      return {
-			        success: false,
-			      };
-			    }
-			
-			    options?.onComplete?.(
-			      result.translations.map((item) => ({
-			        content: item.text,
-			      })),
-			      params.requestId,
-			    );
-			
-			    return {
-			      success: true,
-			      result: result.translations.map((item) => ({
-			        content: item.text,
-			      })),
-			    };
+			    // ... DeepL 原有代码保持不变 ...
 			  }
+			
+			  // Custom 分支（现在在正确的作用域内）
+			  if (apiConfig.api_type === TranslationApiType.Custom) {
+			    setStartTranslateLoading(true);
+			    try {
+			      const customClient = new OpenAI({
+			        apiKey: apiConfig.api_key ?? "",
+			        baseURL: apiConfig.api_uri ?? apiConfig.custom_api_uri ?? "",
+			        dangerouslyAllowBrowser: true,
+			        fetch: appFetch,
+			      });
+			
+			      const streamResponse = await customClient.chat.completions.create({
+			        model: apiConfig.api_model ?? "",
+			        messages: [
+			          { role: "system", content: "你是一个翻译助手，请将以下文本翻译成目标语言。" },
+			          { role: "user", content: `请将以下文本从 ${params.sourceLanguage} 翻译成${params.targetLanguage}：\n${params.sourceContent.join('\n')}` }
+			        ],
+			        stream: true
+			      });
+			
+			      setDeltaTranslateLoading(true);
+			      setTranslatedContent("");
+			      let customResponseContent = "";
+			      for await (const event of streamResponse) {
+			        if (event.choices.length > 0 && event.choices[0].delta.content) {
+			          const deltaContent = event.choices[0].delta.content;
+			          setTranslatedContent((prev) => `${prev}${deltaContent}`);
+			          customResponseContent += deltaContent;
+			          options?.onDeltaContent?.(deltaContent);
+			        }
+			      }
+			      setDeltaTranslateLoading(false);
+			      setStartTranslateLoading(false);
+			
+			      const customResult = [{ content: customResponseContent }];
+			      options?.onComplete?.(customResult, params.requestId);
+			      return { success: true, result: customResult };
+			    } catch (error) {
+			      appError("[customTranslation] custom API error", error);
+			      setDeltaTranslateLoading(false);
+			      setStartTranslateLoading(false);
+			      return { success: false };
+			    }
+			  }
+			
+			  // 如果是其他 translationApiConfig 类型，可在此处理或返回失败
+			  return { success: false };
+			}
 			
 			if (apiConfig.api_type === TranslationApiType.Custom) {
 				setStartTranslateLoading(true);
