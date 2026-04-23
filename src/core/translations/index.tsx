@@ -312,139 +312,136 @@ export const useTranslationRequest = (options?: {
 			const config = supportedTranslationTypesRef.current.find(
 				(item) => item.type === params.translationType,
 			);
-
+	
 			if (!config || typeof config.type !== "string") {
 				return {
 					success: false,
 				};
 			}
-
+	
+			// 处理 translationApiConfig 类型（DeepL 和 Custom）
 			if ("translationApiConfig" in config) {
-			  const apiConfig = config.translationApiConfig;
-			
-			  // DeepL 分支
-			  if (apiConfig.api_type === TranslationApiType.DeepL) {
-			    // ... DeepL 原有代码保持不变 ...
-			  }
-			
-			  // Custom 分支（现在在正确的作用域内）
-			  if (apiConfig.api_type === TranslationApiType.Custom) {
-			    setStartTranslateLoading(true);
-			    try {
-			      const customClient = new OpenAI({
-			        apiKey: apiConfig.api_key ?? "",
-			        baseURL: apiConfig.api_uri ?? apiConfig.custom_api_uri ?? "",
-			        dangerouslyAllowBrowser: true,
-			        fetch: appFetch,
-			      });
-			
-			      const streamResponse = await customClient.chat.completions.create({
-			        model: apiConfig.api_model ?? "",
-			        messages: [
-			          { role: "system", content: "你是一个翻译助手，请将以下文本翻译成目标语言。" },
-			          { role: "user", content: `请将以下文本从 ${params.sourceLanguage} 翻译成${params.targetLanguage}：\n${params.sourceContent.join('\n')}` }
-			        ],
-			        stream: true
-			      });
-			
-			      setDeltaTranslateLoading(true);
-			      setTranslatedContent("");
-			      let customResponseContent = "";
-			      for await (const event of streamResponse) {
-			        if (event.choices.length > 0 && event.choices[0].delta.content) {
-			          const deltaContent = event.choices[0].delta.content;
-			          setTranslatedContent((prev) => `${prev}${deltaContent}`);
-			          customResponseContent += deltaContent;
-			          options?.onDeltaContent?.(deltaContent);
-			        }
-			      }
-			      setDeltaTranslateLoading(false);
-			      setStartTranslateLoading(false);
-			
-			      const customResult = [{ content: customResponseContent }];
-			      options?.onComplete?.(customResult, params.requestId);
-			      return { success: true, result: customResult };
-			    } catch (error) {
-			      appError("[customTranslation] custom API error", error);
-			      setDeltaTranslateLoading(false);
-			      setStartTranslateLoading(false);
-			      return { success: false };
-			    }
-			  }
-			
-			  // 如果是其他 translationApiConfig 类型，可在此处理或返回失败
-			  return { success: false };
-			}
-			
-			if (apiConfig.api_type === TranslationApiType.Custom) {
-				setStartTranslateLoading(true);
-				try {
-					// 必须先创建 client 实例 (兼容可能存在的不同字段名)
-					const customClient = new OpenAI({
-						apiKey: (apiConfig as any).api_key ?? "",
-						baseURL: (apiConfig as any).api_uri ?? (apiConfig as any).custom_api_uri ?? "",
-						dangerouslyAllowBrowser: true,
-						fetch: appFetch,
-					});
-
-					// 调用 llama.cpp 的 Chat API (流式)
-					const streamResponse = await customClient.chat.completions.create({
-						model: (apiConfig as any).api_model ?? "",
-						messages: [
-							{ role: "system", content: "你是一个翻译助手，请将以下文本翻译成目标语言。" },
-							{ role: "user", content: `请将以下文本从 ${params.sourceLanguage} 翻译成${params.targetLanguage}：\n${params.sourceContent.join('\n')}` }
-						],
-						stream: true
-					});
-
-					setDeltaTranslateLoading(true);
-					setTranslatedContent("");
-					let customResponseContent = "";
-					
-					// 正确处理流式响应（打字机效果）
-					for await (const event of streamResponse) {
-						if (event.choices.length > 0 && event.choices[0].delta.content) {
-							const deltaContent = event.choices[0].delta.content;
-							setTranslatedContent((prev) => `${prev}${deltaContent}`);
-							customResponseContent += deltaContent;
-							options?.onDeltaContent?.(deltaContent);
-						}
+				const apiConfig = config.translationApiConfig;
+	
+				// DeepL 分支
+				if (apiConfig.api_type === TranslationApiType.DeepL) {
+					setStartTranslateLoading(true);
+					let result: DeepLTranslateResult | undefined;
+					try {
+						result = await translateTextDeepL(
+							apiConfig.api_uri,
+							apiConfig.api_key,
+							params.sourceContent,
+							convertLanguageCodeToDeepLSourceLanguageCode(params.sourceLanguage),
+							convertLanguageCodeToDeepLTargetLanguageCode(params.targetLanguage),
+							apiConfig.deepl_prefer_quality_optimized ?? false,
+						);
+					} catch (error) {
+						appError("[customTranslation] translateTextDeepL error", error);
 					}
-					
-					setDeltaTranslateLoading(false);
 					setStartTranslateLoading(false);
-
-					// 返回最终结果
-					const customResult = [{ content: customResponseContent }];
-					options?.onComplete?.(customResult, params.requestId);
+	
+					if (!result) {
+						return {
+							success: false,
+						};
+					}
+	
+					const translatedResults = result.translations.map((item) => ({
+						content: item.text,
+					}));
 					
+					// 更新界面显示
+					setTranslatedContent(
+						translatedResults.map((item) => item.content).join("\n"),
+					);
+					options?.onComplete?.(translatedResults, params.requestId);
+	
 					return {
 						success: true,
-						result: customResult,
-					};
-				} catch (error) {
-					appError("[customTranslation] llama.cpp chat error", error);
-					setDeltaTranslateLoading(false);
-					setStartTranslateLoading(false);
-					return {
-						success: false,
+						result: translatedResults,
 					};
 				}
-				// 如果是自定义翻译API，处理完上面的 DeepL 或 Custom 就直接结束，不走下面的普通AI模型逻辑
-				return {
-					success: false,
-				};
+	
+				// Custom 分支（使用用户配置的提示词）
+				if (apiConfig.api_type === TranslationApiType.Custom) {
+					setStartTranslateLoading(true);
+					try {
+						const customClient = new OpenAI({
+							apiKey: apiConfig.api_key ?? "",
+							baseURL: apiConfig.api_uri ?? apiConfig.custom_api_uri ?? "",
+							dangerouslyAllowBrowser: true,
+							fetch: appFetch,
+						});
+	
+						// 使用用户配置的提示词，而不是硬编码
+						const systemPrompt = getTranslationPrompt(
+							translationConfig?.translationSystemPrompt ?? defaultTranslationPrompt,
+							params.sourceLanguage,
+							params.targetLanguage,
+							params.translationDomain,
+						);
+	
+						const streamResponse = await customClient.chat.completions.create({
+							model: apiConfig.api_model ?? "",
+							messages: [
+								{ role: "system", content: systemPrompt },
+								{ role: "user", content: params.sourceContent.join("%%") }
+							],
+							stream: true
+						});
+	
+						setDeltaTranslateLoading(true);
+						setTranslatedContent("");
+						let customResponseContent = "";
+						
+						for await (const event of streamResponse) {
+							if (event.choices.length > 0 && event.choices[0].delta.content) {
+								const deltaContent = event.choices[0].delta.content;
+								setTranslatedContent((prev) => `${prev}${deltaContent}`);
+								customResponseContent += deltaContent;
+								options?.onDeltaContent?.(deltaContent);
+							}
+						}
+						
+						setDeltaTranslateLoading(false);
+						setStartTranslateLoading(false);
+	
+						// 处理多段文本
+						const customResult = params.sourceContent.length > 1
+							? customResponseContent.split("%%").map((item) => ({ content: trim(item) }))
+							: [{ content: customResponseContent }];
+						
+						options?.onComplete?.(customResult, params.requestId);
+						
+						return {
+							success: true,
+							result: customResult,
+						};
+					} catch (error) {
+						appError("[customTranslation] custom API error", error);
+						setDeltaTranslateLoading(false);
+						setStartTranslateLoading(false);
+						return {
+							success: false,
+						};
+					}
+				}
+	
+				// 如果是其他 translationApiConfig 类型，返回失败
+				return { success: false };
 			}
-
+	
+			// 处理普通 AI 模型（chatApiConfig）
 			const client = new OpenAI({
 				apiKey: config.apiConfig.api_key,
 				baseURL: config.apiConfig.api_uri,
 				dangerouslyAllowBrowser: true,
 				fetch: appFetch,
 			});
-
+	
 			setStartTranslateLoading(true);
-
+	
 			let responseContent: string = "";
 			try {
 				const streamResponse = await client.chat.completions.create({
@@ -453,11 +450,10 @@ export const useTranslationRequest = (options?: {
 						{
 							role: "system",
 							content: getTranslationPrompt(
-								translationConfig?.translationSystemPrompt ??
-									defaultTranslationPrompt,
-								sourceLanguage,
-								targetLanguage,
-								translationDomain,
+								translationConfig?.translationSystemPrompt ?? defaultTranslationPrompt,
+								params.sourceLanguage,
+								params.targetLanguage,
+								params.translationDomain,
 							),
 						},
 						{
@@ -469,15 +465,14 @@ export const useTranslationRequest = (options?: {
 					temperature: chatConfig?.temperature ?? 1,
 					stream: true,
 				});
-
+	
 				setDeltaTranslateLoading(true);
 				try {
 					setTranslatedContent("");
 					for await (const event of streamResponse) {
 						if (event.choices.length > 0 && event.choices[0].delta.content) {
 							setTranslatedContent(
-								(prevContent) =>
-									`${prevContent}${event.choices[0].delta.content}`,
+								(prevContent) => `${prevContent}${event.choices[0].delta.content}`,
 							);
 							responseContent += event.choices[0].delta.content;
 							options?.onDeltaContent?.(event.choices[0].delta.content);
@@ -492,23 +487,19 @@ export const useTranslationRequest = (options?: {
 			} finally {
 				setStartTranslateLoading(false);
 			}
-
-			const result =
-				params.sourceContent.length > 1
-					? responseContent.split("%%").map((item) => ({ content: trim(item) }))
-					: [{ content: responseContent }];
-
+	
+			const result = params.sourceContent.length > 1
+				? responseContent.split("%%").map((item) => ({ content: trim(item) }))
+				: [{ content: responseContent }];
+	
 			options?.onComplete?.(result, params.requestId);
-
+	
 			return {
 				success: true,
-				result: [{ content: responseContent }],
+				result,
 			};
 		},
 		[
-			sourceLanguage,
-			targetLanguage,
-			translationDomain,
 			supportedTranslationTypesRef,
 			chatConfig?.maxTokens,
 			chatConfig?.temperature,
@@ -517,7 +508,7 @@ export const useTranslationRequest = (options?: {
 			setTranslatedContent,
 		],
 	);
-
+	
 	const requestTranslate = useCallback(
 		async (sourceContent: string[], requestId?: number) => {
 			const translationType = translationTypeRef.current;
